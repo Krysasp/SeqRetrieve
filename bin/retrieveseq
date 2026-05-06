@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""
+SeqRetrieve - A comprehensive tool for retrieving, sorting, aligning, filtering,
+and reporting GenBank sequences.
+
+Usage:
+    SeqRetrieve retrieve -i accessions.csv -o sequences.fasta -e your@email.com
+    SeqRetrieve metadata -i accessions.csv -o metadata.tsv -e your@email.com
+    SeqRetrieve sort -f seqs.fasta -m meta.tsv --field species -of sorted.fasta -om sorted.tsv
+    SeqRetrieve align -f seqs.fasta -m meta.tsv --field species -o aligned/
+    SeqRetrieve filter -f seqs.fasta -o output/ --min-length-pct 80
+    SeqRetrieve report -o report.html -m meta.tsv --filter-report filter_report.tsv
+"""
+
+import sys
+import os
+import argparse
+
+# Add src directory to path
+SRC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src')
+sys.path.insert(0, SRC_DIR)
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog='SeqRetrieve',
+        description='SeqRetrieve - GenBank sequence retrieval and analysis toolkit',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+
+    # Retrieve sequences
+    retrieve_parser = subparsers.add_parser('retrieve', help='Retrieve sequences from GenBank')
+    retrieve_parser.add_argument('-i', '--input', required=True, help='Input CSV file')
+    retrieve_parser.add_argument('-o', '--output', required=True, help='Output FASTA file')
+    retrieve_parser.add_argument('-e', '--email', required=True, help='Email for NCBI')
+    retrieve_parser.add_argument('-c', '--column', default=None, help='Column name for accessions')
+    retrieve_parser.add_argument('-r', '--resume', default=None, help='Resume from existing FASTA')
+    retrieve_parser.add_argument('--batch-size', type=int, default=50, help='Batch size (default 50)')
+    retrieve_parser.add_argument('--max-retries', type=int, default=5, help='Max retries (default 5)')
+    retrieve_parser.set_defaults(func=run_retrieve)
+
+    # Retrieve metadata
+    metadata_parser = subparsers.add_parser('metadata', help='Retrieve metadata from GenBank')
+    metadata_parser.add_argument('-i', '--input', help='Input CSV file')
+    metadata_parser.add_argument('-f', '--fasta', help='Input FASTA file')
+    metadata_parser.add_argument('-o', '--output', required=True, help='Output TSV file')
+    metadata_parser.add_argument('-e', '--email', required=True, help='Email for NCBI')
+    metadata_parser.add_argument('-c', '--column', default=None, help='Column name')
+    metadata_parser.add_argument('-r', '--resume', default=None, help='Resume from existing TSV')
+    metadata_parser.add_argument('--batch-size', type=int, default=50, help='Batch size (default 50)')
+    metadata_parser.set_defaults(func=run_metadata)
+
+    # Sort
+    sort_parser = subparsers.add_parser('sort', help='Sort sequences and metadata by field')
+    sort_parser.add_argument('-f', '--fasta', required=True, help='Input FASTA file')
+    sort_parser.add_argument('-m', '--metadata', required=True, help='Input metadata TSV')
+    sort_parser.add_argument('--field', required=True, help='Field to sort by')
+    sort_parser.add_argument('-of', '--output-fasta', required=True, help='Output sorted FASTA')
+    sort_parser.add_argument('-om', '--output-metadata', required=True, help='Output sorted TSV')
+    sort_parser.set_defaults(func=run_sort)
+
+    # Align
+    align_parser = subparsers.add_parser('align', help='Align sequences grouped by field')
+    align_parser.add_argument('-f', '--fasta', required=True, help='Input FASTA file')
+    align_parser.add_argument('-m', '--metadata', required=True, help='Input metadata TSV')
+    align_parser.add_argument('--field', required=True, help='Field to group by')
+    align_parser.add_argument('-o', '--output-dir', required=True, help='Output directory')
+    align_parser.add_argument('--tool', default=None, help='Alignment tool (muscle, clustalo, mafft)')
+    align_parser.set_defaults(func=run_align)
+
+    # Filter
+    filter_parser = subparsers.add_parser('filter', help='Filter sequences by length/ambiguity')
+    filter_parser.add_argument('-f', '--fasta', required=True, help='Input FASTA file')
+    filter_parser.add_argument('-o', '--output-dir', required=True, help='Output directory')
+    filter_parser.add_argument('--filtered-subdir', default='filtered', help='Subdir for filtered (default: filtered)')
+    filter_parser.add_argument('--min-length-pct', type=float, default=None, help='Min length %% of longest')
+    filter_parser.add_argument('--max-ambig-count', type=int, default=None, help='Max ambiguous base count')
+    filter_parser.add_argument('--max-ambig-pct', type=float, default=None, help='Max ambiguous base %%')
+    filter_parser.set_defaults(func=run_filter)
+
+    # Report
+    report_parser = subparsers.add_parser('report', help='Generate HTML report')
+    report_parser.add_argument('-o', '--output', required=True, help='Output HTML file')
+    report_parser.add_argument('-f', '--fasta', default=None, help='Input FASTA file')
+    report_parser.add_argument('-m', '--metadata', default=None, help='Input metadata TSV')
+    report_parser.add_argument('--filter-report', default=None, help='Filter report TSV')
+    report_parser.set_defaults(func=run_report)
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+    args.func(args)
+
+def run_retrieve(args):
+    from retrieve_seq import main as retrieve_main
+    # Reconstruct sys.argv for the original script
+    import sys
+    sys.argv = ['retrieve_seq.py',
+                '-i', args.input,
+                '-o', args.output,
+                '-e', args.email]
+    if args.column:
+        sys.argv.extend(['-c', args.column])
+    if args.resume:
+        sys.argv.extend(['-r', args.resume])
+    if args.batch_size != 50:
+        sys.argv.extend(['--batch-size', str(args.batch_size)])
+    if args.max_retries != 5:
+        sys.argv.extend(['--max-retries', str(args.max_retries)])
+    retrieve_main()
+
+def run_metadata(args):
+    from retrieve_metadata import main as meta_main
+    sys.argv = ['retrieve_metadata.py',
+                '-o', args.output,
+                '-e', args.email]
+    if args.input:
+        sys.argv.extend(['-i', args.input])
+    if args.fasta:
+        sys.argv.extend(['-f', args.fasta])
+    if args.column:
+        sys.argv.extend(['-c', args.column])
+    if args.resume:
+        sys.argv.extend(['-r', args.resume])
+    if args.batch_size != 50:
+        sys.argv.extend(['--batch-size', str(args.batch_size)])
+    meta_main()
+
+def run_sort(args):
+    from sort_seqs import main as sort_main
+    sys.argv = ['sort_seqs.py',
+                '-f', args.fasta,
+                '-m', args.metadata,
+                '--field', args.field,
+                '-of', args.output_fasta,
+                '-om', args.output_metadata]
+    sort_main()
+
+def run_align(args):
+    from align_seqs import main as align_main
+    sys.argv = ['align_seqs.py',
+                '-f', args.fasta,
+                '-m', args.metadata,
+                '--field', args.field,
+                '-o', args.output_dir]
+    if args.tool:
+        sys.argv.extend(['--tool', args.tool])
+    align_main()
+
+def run_filter(args):
+    from filter_seqs import main as filter_main
+    sys.argv = ['filter_seqs.py',
+                '-f', args.fasta,
+                '-o', args.output_dir,
+                '--filtered-subdir', args.filtered_subdir]
+    if args.min_length_pct:
+        sys.argv.extend(['--min-length-pct', str(args.min_length_pct)])
+    if args.max_ambig_count:
+        sys.argv.extend(['--max-ambig-count', str(args.max_ambig_count)])
+    if args.max_ambig_pct:
+        sys.argv.extend(['--max-ambig-pct', str(args.max_ambig_pct)])
+    filter_main()
+
+def run_report(args):
+    from generate_report import main as report_main
+    sys.argv = ['generate_report.py',
+                '-o', args.output]
+    if args.fasta:
+        sys.argv.extend(['-f', args.fasta])
+    if args.metadata:
+        sys.argv.extend(['-m', args.metadata])
+    if args.filter_report:
+        sys.argv.extend(['--filter-report', args.filter_report])
+    report_main()
+
+if __name__ == '__main__':
+    main()
