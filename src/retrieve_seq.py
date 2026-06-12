@@ -107,6 +107,100 @@ class SmartGenBankFetcher:
             print(f"Warning: Could not read existing FASTA file: {e}")
         return accessions
     
+    def compile_accessions_from_output_dir(self, output_dir: str) -> Set[str]:
+        """
+        Compile accession IDs from all FASTA files in the output directory.
+        Prompts user to confirm compilation.
+        
+        Args:
+            output_dir: Directory containing FASTA files
+            
+        Returns:
+            Set of accession numbers from all FASTA files
+        """
+        if not os.path.isdir(output_dir):
+            print(f"Warning: Output directory '{output_dir}' not found")
+            return set()
+        
+        # Find all FASTA files
+        fasta_files = []
+        for f in os.listdir(output_dir):
+            if f.endswith('.fasta') or f.endswith('.fa'):
+                fasta_files.append(os.path.join(output_dir, f))
+        
+        if not fasta_files:
+            print(f"No FASTA files found in {output_dir}")
+            return set()
+        
+        print(f"\nFound {len(fasta_files)} FASTA file(s) in {output_dir}:")
+        for f in fasta_files:
+            file_size = os.path.getsize(f) / (1024 * 1024)
+            print(f"  - {os.path.basename(f)} ({file_size:.1f} MB)")
+        
+        # Prompt user
+        response = input("\nCompile accession IDs from these files? (y/n): ")
+        if response.lower() != 'y':
+            print("Skipping compilation")
+            return set()
+        
+        # Compile accessions from all files
+        all_accessions = set()
+        total_sequences = 0
+        
+        for fasta_file in fasta_files:
+            try:
+                for record in SeqIO.parse(fasta_file, "fasta"):
+                    acc_with_version = record.id.split()[0]
+                    all_accessions.add(acc_with_version)
+                    acc_no_version = acc_with_version.split('.')[0]
+                    all_accessions.add(acc_no_version)
+                    total_sequences += 1
+                print(f"  Loaded {len(all_accessions):,} accessions from {os.path.basename(fasta_file)}")
+            except Exception as e:
+                print(f"  Warning: Could not read {os.path.basename(fasta_file)}: {e}")
+        
+        print(f"\nTotal compiled accessions: {len(all_accessions):,} (from {total_sequences} sequences)")
+        return all_accessions
+    
+    def load_existing_sequences(self, output_dir: str, target_accessions: Set[str]) -> List[object]:
+        """
+        Load existing sequences from FASTA files in the output directory.
+        Deduplicates sequences by base accession ID (keeps first occurrence).
+        
+        Args:
+            output_dir: Directory containing FASTA files
+            target_accessions: Set of accession IDs to load (base accessions without version)
+            
+        Returns:
+            List of SeqRecord objects, deduplicated by base accession ID
+        """
+        existing_records = []
+        seen_accessions = set()
+        
+        # Find all FASTA files
+        fasta_files = []
+        for f in os.listdir(output_dir):
+            if f.endswith('.fasta') or f.endswith('.fa'):
+                # Exclude intermediate checkpoint files and current run files
+                if '_run_' not in f or not f.startswith(datetime.now().strftime('%Y-%m-%d')):
+                    fasta_files.append(os.path.join(output_dir, f))
+        
+        for fasta_file in sorted(fasta_files):
+            try:
+                for record in SeqIO.parse(fasta_file, "fasta"):
+                    acc_with_version = record.id.split()[0]
+                    acc_no_version = acc_with_version.split('.')[0]
+                    
+                    # Only include if in target accessions and not already seen
+                    if acc_no_version in target_accessions and acc_no_version not in seen_accessions:
+                        existing_records.append(record)
+                        seen_accessions.add(acc_no_version)
+            except Exception as e:
+                print(f"  Warning: Could not read {os.path.basename(fasta_file)}: {e}")
+        
+        print(f"  Loaded {len(existing_records):,} unique sequences (deduplicated by accession ID)")
+        return existing_records
+    
     def exponential_backoff(self, attempt: int) -> float:
         """Calculate delay with exponential backoff and jitter."""
         delay = min(self.max_delay, self.base_delay * (2 ** attempt))
@@ -292,7 +386,7 @@ class SmartGenBankFetcher:
             
         return batch_results, batch_failed
     
-    def fetch_sequences(self, accessions: List[str], batch_size: int = 50, resume: bool = False, existing_fasta: str = None) -> bool:
+    def fetch_sequences(self, accessions: List[str], batch_size: int = 50, resume: bool = False, existing_fasta: str = None, date_str: str = None) -> bool:
         """
         Main fetch method with adaptive batching and rate limiting.
 
@@ -301,6 +395,7 @@ class SmartGenBankFetcher:
             batch_size: Size of batches (smaller is safer for rate limits)
             resume: If True, filter out already-retrieved accessions
             existing_fasta: Path to existing FASTA file for resume mode
+            date_str: Date string for naming intermediate files (YYYY-MM-DD format)
         """
         # Handle resume mode
         if resume and existing_fasta:
@@ -376,7 +471,10 @@ class SmartGenBankFetcher:
 
             # Save intermediate results every 10 batches
             if batch_num % 10 == 0:
-                self.save_intermediate_results(f"intermediate_batch_{batch_num}.fasta")
+                run_num = batch_num // 10
+                # Use provided date_str or generate one
+                checkpoint_date = date_str if date_str else datetime.now().strftime('%Y-%m-%d')
+                self.save_intermediate_results(f"{checkpoint_date}_run_{run_num}.fasta", checkpoint_date)
 
         # Calculate final statistics
         elapsed = time.time() - start_time
@@ -411,13 +509,20 @@ class SmartGenBankFetcher:
             print(f"Error saving to {output_file}: {e}")
             return False
     
-    def save_intermediate_results(self, filename: str):
-        """Save intermediate results as checkpoint."""
+    def save_intermediate_results(self, filename: str, date_str: str = None):
+        """Save intermediate results as checkpoint with date-based naming."""
         if self.results:
             try:
-                with open(filename, 'w') as f:
+                if date_str:
+                    # Use date-based naming for intermediate files
+                    run_num = int(filename.split('_run_')[1].split('.')[0])
+                    full_filename = f"{filename}"
+                else:
+                    full_filename = filename
+                    
+                with open(full_filename, 'w') as f:
                     SeqIO.write(self.results, f, "fasta")
-                print(f"  ✓ Intermediate checkpoint saved to {filename}")
+                print(f"  ✓ Intermediate checkpoint saved to {full_filename}")
             except Exception as e:
                 print(f"  ⚠ Could not save checkpoint: {e}")
     
@@ -546,6 +651,12 @@ RECOMMENDED USAGE:
     parser.add_argument('--test', action='store_true',
                        help='Test mode: only fetch first 100 sequences')
 
+    parser.add_argument('--compile-existing', action='store_true',
+                       help='Compile accession IDs from existing FASTA files in output directory before fetching')
+
+    parser.add_argument('--output-dir', default=None,
+                       help='Directory containing existing FASTA files for compilation (default: output/)')
+
     args = parser.parse_args()
 
     # Validate batch size
@@ -563,11 +674,44 @@ RECOMMENDED USAGE:
         max_delay=args.max_delay
     )
 
-    # Read accessions
-    accessions = fetcher.read_accessions_from_csv(args.input, args.column)
+    # Compile accessions from existing FASTA files if requested
+    compiled_accessions = set()
+    if args.compile_existing:
+        output_dir = args.output_dir if args.output_dir else 'output'
+        print(f"\n{'='*70}")
+        print(f"COMPILING EXISTING FASTA FILES")
+        print(f"{'='*70}")
+        compiled_accessions = fetcher.compile_accessions_from_output_dir(output_dir)
+        if not compiled_accessions:
+            print("No accessions compiled, proceeding with CSV only")
+
+    # Read accessions from CSV
+    csv_accessions = fetcher.read_accessions_from_csv(args.input, args.column)
+
+    if not csv_accessions:
+        print("Error: No accession numbers found in CSV")
+        sys.exit(1)
+
+    # Combine accessions if compilation was performed
+    if args.compile_existing and compiled_accessions:
+        # Pre-filter: only fetch accessions NOT already in compiled set
+        new_accessions = [acc for acc in csv_accessions if acc not in compiled_accessions]
+        print(f"\n{'='*70}")
+        print(f"ACCESSION SET ANALYSIS")
+        print(f"{'='*70}")
+        print(f"From existing FASTA (already downloaded): {len(compiled_accessions):,} accessions")
+        print(f"From CSV (new to fetch): {len(new_accessions):,} accessions")
+        print(f"Total unique in final output: {len(compiled_accessions) + len(new_accessions):,} accessions")
+        
+        # Store for later use: we'll load existing sequences and append new ones
+        accessions_to_fetch = new_accessions
+        accessions = csv_accessions  # Keep original for reference
+    else:
+        accessions_to_fetch = csv_accessions
+        accessions = csv_accessions
 
     if not accessions:
-        print("Error: No accession numbers found")
+        print("Error: No accession numbers to fetch")
         sys.exit(1)
 
     # Test mode
@@ -586,12 +730,43 @@ RECOMMENDED USAGE:
         print(f"RESUME MODE: Continuing from {args.resume}")
         print(f"{'='*70}")
 
+    # Determine output filename and date string
+    final_output = args.output
+    date_str = datetime.now().strftime('%Y-%m-%d')
+    
+    if args.compile_existing and compiled_accessions:
+        # Generate date-based filename with running number
+        base_name = os.path.splitext(os.path.basename(args.output))[0]
+        # Find existing run numbers in the final output directory to determine next run number
+        # The final output will be created in the same directory as args.output
+        output_dir = os.path.dirname(args.output)
+        if not output_dir:
+            output_dir = '.'  # Current directory
+        existing_runs = []
+        if os.path.exists(output_dir):
+            for f in os.listdir(output_dir):
+                if f.startswith(f"{date_str}_{base_name}") and f.endswith('.fasta'):
+                    # Extract run number from filename (format: date_name_runN.fasta)
+                    try:
+                        suffix = f.replace(f"{date_str}_{base_name}_", "").replace('.fasta', "")
+                        if suffix.startswith('run') and suffix[3:].isdigit():
+                            existing_runs.append(int(suffix[3:]))
+                    except:
+                        pass
+        run_num = max(existing_runs, default=0) + 1
+        # Preserve the directory path from args.output
+        if output_dir and output_dir != '.':
+            final_output = f"{output_dir}/{date_str}_{base_name}_run{run_num}.fasta"
+        else:
+            final_output = f"{date_str}_{base_name}_run{run_num}.fasta"
+        print(f"\nOutput filename: {final_output} (run {run_num})")
+
     # Print configuration
     print(f"\n{'='*70}")
     print(f"OPTIMIZED GENBANK FETCHER CONFIGURATION")
     print(f"{'='*70}")
     print(f"Input file: {args.input}")
-    print(f"Output file: {args.output}")
+    print(f"Output file: {final_output}")
     print(f"Total accessions: {len(accessions):,}")
     print(f"Batch size: {args.batch_size}")
     print(f"Base delay: {args.base_delay}s")
@@ -600,12 +775,14 @@ RECOMMENDED USAGE:
     print(f"Email: {args.email}")
     if resume_mode:
         print(f"Resume file: {args.resume}")
+    if args.compile_existing:
+        print(f"Compile existing: Yes (from {args.output_dir or 'output/'})")
     print(f"{'='*70}")
 
     # Confirm with user for large datasets
-    if len(accessions) > 10000 and not resume_mode:
-        print(f"\n⚠  Large dataset detected ({len(accessions):,} sequences)")
-        print(f"Estimated time: ~{len(accessions) * 2 / 3600:.1f} hours (assuming 2 seconds per sequence)")
+    if len(accessions_to_fetch) > 10000 and not resume_mode and not args.compile_existing:
+        print(f"\n⚠  Large dataset detected ({len(accessions_to_fetch):,} sequences)")
+        print(f"Estimated time: ~{len(accessions_to_fetch) * 2 / 3600:.1f} hours (assuming 2 seconds per sequence)")
         response = input("Continue? (y/n): ")
         if response.lower() != 'y':
             print("Aborted by user")
@@ -613,11 +790,26 @@ RECOMMENDED USAGE:
 
     # Start retrieval
     start_time = time.time()
-    success = fetcher.fetch_sequences(accessions, batch_size=args.batch_size, resume=resume_mode, existing_fasta=args.resume)
+    
+    # If compile_existing is used, we need to load existing sequences first
+    if args.compile_existing and compiled_accessions:
+        print(f"\n{'='*70}")
+        print(f"LOADING EXISTING SEQUENCES")
+        print(f"{'='*70}")
+        existing_sequences = fetcher.load_existing_sequences(output_dir, compiled_accessions)
+        print(f"Loaded {len(existing_sequences):,} existing sequences from FASTA files")
+    
+    success = fetcher.fetch_sequences(accessions_to_fetch, batch_size=args.batch_size, resume=resume_mode, 
+                                     existing_fasta=args.resume, date_str=date_str)
 
     if success:
-        # Save results (append if resume mode)
-        fetcher.save_results(args.output, resume=resume_mode)
+        # If compile_existing, combine existing + new sequences
+        if args.compile_existing and compiled_accessions:
+            fetcher.results = existing_sequences + fetcher.results
+            print(f"\nCombined {len(existing_sequences):,} existing + {len(fetcher.results) - len(existing_sequences):,} new = {len(fetcher.results):,} total sequences")
+        
+        # Save results to final output file
+        fetcher.save_results(final_output, resume=resume_mode)
         fetcher.display_sequence_stats()
 
         # Save failed accessions for retry

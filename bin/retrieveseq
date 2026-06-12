@@ -10,6 +10,14 @@ Usage:
     SeqRetrieve align -f seqs.fasta -m meta.tsv --field species -o aligned/
     SeqRetrieve filter -f seqs.fasta -o output/ --min-length-pct 80
     SeqRetrieve report -o report.html -m meta.tsv --filter-report filter_report.tsv
+
+Commands:
+    retrieve    Download sequences from GenBank by accession numbers
+    metadata    Extract metadata from GenBank records (organism, taxid, dates, etc.)
+    sort        Sort FASTA sequences and metadata TSV by any field (taxid, species, year, etc.)
+    align       Align sequences grouped by field using MUSCLE/Clustal Omega/MAFFT
+    filter      Filter sequences by length percentage and ambiguous base content
+    report      Generate HTML report with statistics and classification summaries
 """
 
 import sys
@@ -23,68 +31,175 @@ sys.path.insert(0, SRC_DIR)
 def main():
     parser = argparse.ArgumentParser(
         prog='SeqRetrieve',
-        description='SeqRetrieve - GenBank sequence retrieval and analysis toolkit',
+        description='''SeqRetrieve - GenBank sequence retrieval and analysis toolkit
+
+This tool provides a complete workflow for working with GenBank sequences:
+  1. retrieve: Download sequences by accession numbers with batching, retry logic, and deduplication
+  2. metadata: Extract comprehensive metadata (organism, taxonomy, dates, geography, etc.)
+  3. sort: Sort sequences and metadata by any field (taxid, species, collection_date, etc.)
+  4. align: Auto-align sequences grouped by taxonomy or other fields using external tools
+  5. filter: Filter sequences based on length and ambiguous base thresholds
+  6. report: Generate HTML reports with statistics and classification summaries''',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+    subparsers = parser.add_subparsers(dest='command', help='Available commands', metavar='COMMAND')
 
     # Retrieve sequences
-    retrieve_parser = subparsers.add_parser('retrieve', help='Retrieve sequences from GenBank')
-    retrieve_parser.add_argument('-i', '--input', required=True, help='Input CSV file')
-    retrieve_parser.add_argument('-o', '--output', required=True, help='Output FASTA file')
-    retrieve_parser.add_argument('-e', '--email', required=True, help='Email for NCBI')
-    retrieve_parser.add_argument('-c', '--column', default=None, help='Column name for accessions')
-    retrieve_parser.add_argument('-r', '--resume', default=None, help='Resume from existing FASTA')
-    retrieve_parser.add_argument('--batch-size', type=int, default=50, help='Batch size (default 50)')
-    retrieve_parser.add_argument('--max-retries', type=int, default=5, help='Max retries (default 5)')
+    retrieve_parser = subparsers.add_parser(
+        'retrieve',
+        help='Download sequences from GenBank by accession numbers',
+        description='''Retrieve sequences from GenBank using accession IDs from a CSV file.
+Features:
+  - Batch processing with configurable batch size (default: 50)
+  - Automatic retry with exponential backoff for rate limiting
+  - Resume capability to continue interrupted downloads
+  - Compile existing FASTA files to avoid redundant downloads
+  - Date-based output naming with running number suffix
+  - Deduplication by accession ID (with and without version)
+
+Input CSV format: Must contain accession IDs in first column or specified column.
+Output: Single FASTA file with all retrieved sequences (existing + new).''',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    retrieve_parser.add_argument('-i', '--input', required=True, help='Input CSV file containing GenBank accession numbers')
+    retrieve_parser.add_argument('-o', '--output', required=True, help='Output FASTA file (date-based naming: YYYY-MM-DD_name_runN.fasta)')
+    retrieve_parser.add_argument('-e', '--email', required=True, help='Email address for NCBI Entrez API (required)')
+    retrieve_parser.add_argument('-c', '--column', default=None, help='Column name in CSV containing accession IDs (default: first column)')
+    retrieve_parser.add_argument('-r', '--resume', default=None, help='Resume from existing FASTA file (skips already downloaded accessions)')
+    retrieve_parser.add_argument('--batch-size', type=int, default=50, help='Number of accessions per batch request (default: 50, max recommended: 50)')
+    retrieve_parser.add_argument('--max-retries', type=int, default=5, help='Maximum retry attempts per batch (default: 5)')
+    retrieve_parser.add_argument('--compile-existing', action='store_true', help='Scan output directory for existing FASTA files and compile accessions to avoid re-downloading')
+    retrieve_parser.add_argument('--output-dir', default=None, help='Directory to scan for existing FASTA files (default: same directory as output file)')
     retrieve_parser.set_defaults(func=run_retrieve)
 
     # Retrieve metadata
-    metadata_parser = subparsers.add_parser('metadata', help='Retrieve metadata from GenBank')
-    metadata_parser.add_argument('-i', '--input', help='Input CSV file')
-    metadata_parser.add_argument('-f', '--fasta', help='Input FASTA file')
-    metadata_parser.add_argument('-o', '--output', required=True, help='Output TSV file')
-    metadata_parser.add_argument('-e', '--email', required=True, help='Email for NCBI')
-    metadata_parser.add_argument('-c', '--column', default=None, help='Column name')
-    metadata_parser.add_argument('-r', '--resume', default=None, help='Resume from existing TSV')
-    metadata_parser.add_argument('--batch-size', type=int, default=50, help='Batch size (default 50)')
+    metadata_parser = subparsers.add_parser(
+        'metadata',
+        help='Extract metadata from GenBank records',
+        description='''Retrieve metadata for GenBank accession numbers.
+Extracts and outputs TSV with the following fields:
+  - accession, version, length, taxid
+  - organism, species, genus, family
+  - collection_date, country, isolate, strain
+  - host, genotype, submitter, seq_tech
+
+Input: CSV with accessions OR FASTA file (extracts accessions from headers).
+Output: TSV file with all metadata fields tab-separated.''',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    metadata_parser.add_argument('-i', '--input', help='Input CSV file with accession numbers (alternative to -f/--fasta)')
+    metadata_parser.add_argument('-f', '--fasta', help='Input FASTA file to extract accessions from (alternative to -i/--input)')
+    metadata_parser.add_argument('-o', '--output', required=True, help='Output TSV file for metadata')
+    metadata_parser.add_argument('-e', '--email', required=True, help='Email address for NCBI Entrez API')
+    metadata_parser.add_argument('-c', '--column', default=None, help='Column name in CSV containing accession IDs (default: first column)')
+    metadata_parser.add_argument('-r', '--resume', default=None, help='Resume from existing metadata TSV (skips accessions already in file)')
+    metadata_parser.add_argument('--batch-size', type=int, default=50, help='Number of accessions per batch request (default: 50)')
+    metadata_parser.add_argument('--max-retries', type=int, default=5, help='Maximum retry attempts per batch (default: 5)')
     metadata_parser.set_defaults(func=run_metadata)
 
     # Sort
-    sort_parser = subparsers.add_parser('sort', help='Sort sequences and metadata by field')
-    sort_parser.add_argument('-f', '--fasta', required=True, help='Input FASTA file')
-    sort_parser.add_argument('-m', '--metadata', required=True, help='Input metadata TSV')
-    sort_parser.add_argument('--field', required=True, help='Field to sort by')
-    sort_parser.add_argument('-of', '--output-fasta', required=True, help='Output sorted FASTA')
-    sort_parser.add_argument('-om', '--output-metadata', required=True, help='Output sorted TSV')
+    sort_parser = subparsers.add_parser(
+        'sort',
+        help='Sort FASTA sequences and metadata TSV by any field',
+        description='''Sort sequences and metadata by a specified field.
+Supported fields:
+  - taxid: Sort by numeric taxonomy ID
+  - organism, species, genus, family: Sort by taxonomic classification
+  - country, host, genotype: Sort by metadata qualifiers
+  - collection_date: Sort by year extracted from date string
+  - length: Sort by sequence length (numeric)
+
+Both FASTA and TSV are sorted in the same order to maintain correspondence.
+Sequences without metadata are placed at the end.''',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sort_parser.add_argument('-f', '--fasta', required=True, help='Input FASTA file with sequences to sort')
+    sort_parser.add_argument('-m', '--metadata', required=True, help='Input metadata TSV file (from retrieve_metadata command)')
+    sort_parser.add_argument('--field', required=True, help='Field to sort by (taxid, organism, species, genus, country, host, genotype, collection_date, length, etc.)')
+    sort_parser.add_argument('-of', '--output-fasta', required=True, help='Output sorted FASTA file')
+    sort_parser.add_argument('-om', '--output-metadata', required=True, help='Output sorted metadata TSV file')
     sort_parser.set_defaults(func=run_sort)
 
     # Align
-    align_parser = subparsers.add_parser('align', help='Align sequences grouped by field')
-    align_parser.add_argument('-f', '--fasta', required=True, help='Input FASTA file')
-    align_parser.add_argument('-m', '--metadata', required=True, help='Input metadata TSV')
-    align_parser.add_argument('--field', required=True, help='Field to group by')
-    align_parser.add_argument('-o', '--output-dir', required=True, help='Output directory')
-    align_parser.add_argument('--tool', default=None, help='Alignment tool (muscle, clustalo, mafft)')
+    align_parser = subparsers.add_parser(
+        'align',
+        help='Align sequences grouped by taxonomy or other fields',
+        description='''Auto-align sequences grouped by a specified field.
+Workflow:
+  1. Group sequences by the specified field (species, genus, taxid, year, etc.)
+  2. Align each group separately using external alignment tool
+  3. Output individual aligned FASTA files for each group
+  4. Optionally generate combined aligned FASTA
+
+Supported grouping fields:
+  - taxid, organism, species, genus, family
+  - country, host, genotype
+  - collection_date (groups by year)
+
+Alignment tools (auto-detected or specified):
+  - muscle: Fast, accurate for small to medium datasets
+  - clustalo: Scalable for large datasets
+  - mafft: High accuracy, multiple strategies''',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    align_parser.add_argument('-f', '--fasta', required=True, help='Input FASTA file with sequences to align')
+    align_parser.add_argument('-m', '--metadata', required=True, help='Input metadata TSV file for grouping')
+    align_parser.add_argument('--field', required=True, help='Field to group by (species, genus, taxid, country, collection_date, etc.)')
+    align_parser.add_argument('-o', '--output-dir', required=True, help='Output directory for aligned FASTA files')
+    align_parser.add_argument('--tool', default=None, help='Alignment tool to use: muscle, clustalo, or mafft (auto-detected if not specified)')
+    align_parser.add_argument('--combined-output', default=None, help='Optional: output combined aligned FASTA file for all groups')
     align_parser.set_defaults(func=run_align)
 
     # Filter
-    filter_parser = subparsers.add_parser('filter', help='Filter sequences by length/ambiguity')
-    filter_parser.add_argument('-f', '--fasta', required=True, help='Input FASTA file')
-    filter_parser.add_argument('-o', '--output-dir', required=True, help='Output directory')
-    filter_parser.add_argument('--filtered-subdir', default='filtered', help='Subdir for filtered (default: filtered)')
-    filter_parser.add_argument('--min-length-pct', type=float, default=None, help='Min length %% of longest')
-    filter_parser.add_argument('--max-ambig-count', type=int, default=None, help='Max ambiguous base count')
-    filter_parser.add_argument('--max-ambig-pct', type=float, default=None, help='Max ambiguous base %%')
+    filter_parser = subparsers.add_parser(
+        'filter',
+        help='Filter sequences by length and ambiguous base content',
+        description='''Filter sequences based on quality metrics.
+Filters applied (all must pass to be included):
+  - Length: Minimum length as percentage of longest sequence
+  - Ambiguous count: Maximum count of N and other IUPAC codes
+  - Ambiguous percentage: Maximum percentage of ambiguous bases
+
+Output structure:
+  - Passed sequences: Written to output directory
+  - Filtered sequences: Written to output/filtered_subdir/
+  - Filter report: TSV with details for each filtered sequence
+
+IUPAC ambiguous codes counted: R, Y, S, W, K, M, B, D, H, V (plus N)''',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    filter_parser.add_argument('-f', '--fasta', required=True, help='Input FASTA file to filter')
+    filter_parser.add_argument('-o', '--output-dir', required=True, help='Output directory for passed sequences')
+    filter_parser.add_argument('--filtered-subdir', default='filtered', help='Subdirectory name for filtered sequences (default: filtered)')
+    filter_parser.add_argument('--min-length-pct', type=float, default=None, help='Minimum length as percentage of longest sequence (e.g., 80.0 for 80%%)')
+    filter_parser.add_argument('--max-ambig-count', type=int, default=None, help='Maximum allowed count of ambiguous bases (N + IUPAC codes)')
+    filter_parser.add_argument('--max-ambig-pct', type=float, default=None, help='Maximum allowed percentage of ambiguous bases (e.g., 5.0 for 5%%)')
     filter_parser.set_defaults(func=run_filter)
 
     # Report
-    report_parser = subparsers.add_parser('report', help='Generate HTML report')
-    report_parser.add_argument('-o', '--output', required=True, help='Output HTML file')
-    report_parser.add_argument('-f', '--fasta', default=None, help='Input FASTA file')
-    report_parser.add_argument('-m', '--metadata', default=None, help='Input metadata TSV')
-    report_parser.add_argument('--filter-report', default=None, help='Filter report TSV')
+    report_parser = subparsers.add_parser(
+        'report',
+        help='Generate HTML report with analysis summary',
+        description='''Generate comprehensive HTML report for sequence analysis.
+Report includes:
+  - Summary statistics (total, passed, filtered sequences, longest sequence)
+  - Filter details table (accession, length, N count, ambiguous bases, reasons)
+  - Classification summaries by field (species, genus, organism, taxid, country, etc.)
+  - Year distribution from collection_date field
+  - Percentage breakdowns for all classification fields
+
+Input files are optional but recommended:
+  - metadata: For classification summaries
+  - filter_report: For detailed filtering statistics
+  - fasta: For sequence count verification''',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    report_parser.add_argument('-o', '--output', required=True, help='Output HTML report file')
+    report_parser.add_argument('-f', '--fasta', default=None, help='Input FASTA file (for sequence statistics)')
+    report_parser.add_argument('-m', '--metadata', default=None, help='Input metadata TSV file (for classification summaries)')
+    report_parser.add_argument('--filter-report', default=None, help='Filter report TSV file (for filtering details)')
+    report_parser.add_argument('--filter-stats', default=None, help='JSON file with filter statistics (optional)')
     report_parser.set_defaults(func=run_report)
 
     args = parser.parse_args()
@@ -109,6 +224,10 @@ def run_retrieve(args):
         sys.argv.extend(['--batch-size', str(args.batch_size)])
     if args.max_retries != 5:
         sys.argv.extend(['--max-retries', str(args.max_retries)])
+    if args.compile_existing:
+        sys.argv.append('--compile-existing')
+    if args.output_dir:
+        sys.argv.extend(['--output-dir', args.output_dir])
     retrieve_main()
 
 def run_metadata(args):

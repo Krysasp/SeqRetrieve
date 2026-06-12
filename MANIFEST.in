@@ -1,0 +1,7 @@
+include README.md
+include LICENSE
+include requirements.txt
+include bin/retrieveseq
+recursive-include src *.py
+recursive-include tests *.csv
+recursive-include docs *
